@@ -1,0 +1,37 @@
+# FastAPI backend Dockerfile (Python 3.11)
+# Multi-stage for slimmer final image
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# System deps (build + runtime)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential \
+       libpq-dev \
+       curl \
+       # reportlab image/font deps
+       libjpeg-dev zlib1g-dev libfreetype6-dev liblcms2-dev libharfbuzz-dev libfribidi-dev libopenjp2-7-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps first (better layer caching)
+COPY backend/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy app source
+COPY backend/app ./app
+
+# Expose FastAPI default
+EXPOSE 8000
+
+# Default envs (can be overridden by docker-compose env_file)
+ENV HOST=0.0.0.0 PORT=8000
+
+# Start command with optional Alembic migration if configured
+# If Alembic isn't configured, command will proceed to run the server
+CMD bash -lc "alembic upgrade head || echo 'Alembic not configured, skipping migrations'; \
+    uvicorn app.main:app --host ${HOST} --port ${PORT}"
