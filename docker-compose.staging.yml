@@ -1,0 +1,61 @@
+version: "3.9"
+
+# Staging stack with Nginx TLS termination (Let's Encrypt)
+# Requires .env.deploy with DOMAIN and LETSENCRYPT_EMAIL (use a staging domain)
+
+services:
+  db:
+    extends:
+      file: docker-compose.yml
+      service: db
+
+  backend:
+    extends:
+      file: docker-compose.yml
+      service: backend
+    ports: []
+
+  frontend:
+    extends:
+      file: docker-compose.yml
+      service: frontend
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_BACKEND_URL=/api
+    ports: []
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: financehelper-nginx-staging
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN}
+    volumes:
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d-templates:ro
+      - certbot-www:/var/www/certbot
+      - letsencrypt:/etc/letsencrypt
+    command: >
+      sh -c '
+      cp /etc/nginx/conf.d-templates/staging.conf /etc/nginx/conf.d/staging.conf && \
+      envsubst "$$DOMAIN" < /etc/nginx/conf.d/staging.conf > /etc/nginx/conf.d/default.conf && \
+      nginx -g "daemon off;"'
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: financehelper-certbot-staging
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint: "/bin/sh -c"
+    command: "trap : TERM INT; sleep infinity & wait"
+    restart: unless-stopped
+
+volumes:
+  letsencrypt:
+  certbot-www:
