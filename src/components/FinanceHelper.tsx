@@ -19,8 +19,8 @@ import {
   AreaChart,
   Area,
 } from "recharts";
-import jsPDF from "jspdf";
 import { toast } from "sonner";
+import { createUser, getUsage as apiGetUsage, simulateScenario, exportReport, getPathwayLive } from "@/lib/api";
 
 // Utility helpers
 const currency = (n: number) =>
@@ -31,9 +31,6 @@ const currency = (n: number) =>
   }).format(n);
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
-
-// Backend API base
-const API_BASE = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 export default function FinanceHelper() {
   // Inputs
@@ -57,13 +54,12 @@ export default function FinanceHelper() {
   // Loading flags
   const [simulating, setSimulating] = useState<boolean>(false);
   const [exportingFormat, setExportingFormat] = useState<"pdf" | "docx" | null>(null);
+  const [forecastSummary, setForecastSummary] = useState<string | null>(null);
 
   // Base assumptions
   const baseCustomersRef = useRef<number>(500); // baseline customers per month
   const months = 12;
 
-  // remove: localStorage counters load/persist
-  // ... keep existing code ...
   // Pathway feed: update base customers from backend when connected
   useEffect(() => {
     if (!pathwayConnected) return;
@@ -72,15 +68,7 @@ export default function FinanceHelper() {
 
     const tick = async () => {
       try {
-        const token = localStorage.getItem("bearer_token") || "";
-        const res = await fetch(`${API_BASE}/pathway/live`, {
-          headers: {
-            Authorization: token ? `Bearer ${token}` : "",
-          },
-          cache: "no-store",
-        });
-        if (!res.ok) throw new Error("Pathway fetch failed");
-        const data: { revenueDeltaPct?: number; customers?: number } = await res.json();
+        const data = await getPathwayLive();
         if (!mounted) return;
         if (typeof data.customers === "number") {
           baseCustomersRef.current = clamp(Math.round(data.customers), 100, 10000);
@@ -177,26 +165,16 @@ export default function FinanceHelper() {
         setBootstrapping(true);
         let uid = localStorage.getItem("fh_user_id");
         if (!uid) {
-          const token = localStorage.getItem("bearer_token") || "";
-          const res = await fetch(`${API_BASE}/user`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: token ? `Bearer ${token}` : "",
-            },
-            body: JSON.stringify({}),
-          });
-          if (!res.ok) throw new Error("User creation failed");
-          const data = await res.json();
-          uid = String(data.id ?? data.user_id ?? data.uuid);
+          const user = await createUser("founder@example.com");
+          uid = user.id;
           if (uid) localStorage.setItem("fh_user_id", uid);
         }
         if (cancelled) return;
         setUserId(uid);
         // fetch usage
         if (uid) await fetchUsage(uid);
-      } catch (e) {
-        toast.error("Failed to initialize user");
+      } catch (e: any) {
+        toast.error(e?.message || "Failed to initialize user");
       } finally {
         if (!cancelled) setBootstrapping(false);
       }
@@ -209,17 +187,11 @@ export default function FinanceHelper() {
 
   const fetchUsage = async (uid: string) => {
     try {
-      const token = localStorage.getItem("bearer_token") || "";
-      const res = await fetch(`${API_BASE}/user/${encodeURIComponent(uid)}/usage`, {
-        headers: { Authorization: token ? `Bearer ${token}` : "" },
-        cache: "no-store",
-      });
-      if (!res.ok) throw new Error("Usage fetch failed");
-      const data = await res.json();
-      setScenarioCount(Number(data.scenarios || data.scenario_count || 0));
-      setReportCount(Number(data.reports || data.report_count || 0));
-    } catch (e) {
-      toast.error("Failed to load usage counters");
+      const usage = await apiGetUsage(uid);
+      setScenarioCount(Number(usage.scenarios_run || 0));
+      setReportCount(Number(usage.reports_exported || 0));
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to load usage counters");
     }
   };
 
@@ -227,28 +199,19 @@ export default function FinanceHelper() {
     if (!userId) return;
     try {
       setSimulating(true);
-      const token = localStorage.getItem("bearer_token") || "";
-      const res = await fetch(`${API_BASE}/scenario/simulate`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: token ? `Bearer ${token}` : "",
-        },
-        body: JSON.stringify({
-          user_id: userId,
-          employees,
-          salary,
-          marketing,
-          price,
-          cash,
-        }),
+      const res = await simulateScenario({
+        user_id: userId,
+        employees,
+        salary_per_employee: salary,
+        marketing_spend: marketing,
+        product_price: price,
       });
-      if (!res.ok) throw new Error("Simulation failed");
-      // Optionally: const data = await res.json(); // contains forecast, scenario_id
-      await fetchUsage(userId);
+      setForecastSummary(res.scenario?.forecast_summary || null);
+      setScenarioCount(res.usage?.scenarios_run ?? 0);
+      setReportCount(res.usage?.reports_exported ?? 0);
       toast.success("Scenario simulated");
-    } catch (e) {
-      toast.error("Simulation failed (billing or compute error)");
+    } catch (e: any) {
+      toast.error(e?.message || "Simulation failed (billing or compute error)");
     } finally {
       setSimulating(false);
     }
@@ -269,26 +232,12 @@ export default function FinanceHelper() {
     if (!userId) return;
     try {
       setExportingFormat(format);
-      const token = localStorage.getItem("bearer_token") || "";
-      const res = await fetch(`${API_BASE}/report/export`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: token ? `Bearer ${token}` : "",
-        },
-        body: JSON.stringify({
-          user_id: userId,
-          format,
-          inputs: { employees, salary, marketing, price, cash },
-        }),
-      });
-      if (!res.ok) throw new Error("Export failed");
-      const blob = await res.blob();
-      downloadBlob(blob, `finance-helper-report.${format === "pdf" ? "pdf" : "docx"}`);
-      await fetchUsage(userId);
+      const file = await exportReport({ user_id: userId, report_type: format });
+      downloadBlob(file.blob, file.filename);
+      if (userId) await fetchUsage(userId);
       toast.success(`Exported ${format.toUpperCase()}`);
-    } catch (e) {
-      toast.error("Report export failed (billing or generation error)");
+    } catch (e: any) {
+      toast.error(e?.message || "Report export failed (billing or generation error)");
     } finally {
       setExportingFormat(null);
     }
@@ -436,7 +385,7 @@ export default function FinanceHelper() {
 
             <div className="rounded-md border p-3 text-sm">
               <p className="font-medium">Forecast Summary</p>
-              <p className="text-muted-foreground">{exampleSummary}</p>
+              <p className="text-muted-foreground">{forecastSummary ?? exampleSummary}</p>
             </div>
           </CardContent>
         </Card>
